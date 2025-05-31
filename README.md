@@ -97,6 +97,7 @@ The script generates a CSV file with columns:
 - `negative_aspects` - Comma-separated negative aspects
 
 Example output filename: `review_analysis_730_150_20241201_143022.csv`
+![Screenshot 2025-05-31 at 15 41 33](https://github.com/user-attachments/assets/c8c0c68e-b7bb-4ca5-91a1-44d832ee5f38)
 
 ### 2. Aspect Analyzer
 Fetches and analyzes Steam reviews for sentiment and aspects.
@@ -134,4 +135,4 @@ The script generates a CSV file with columns:
 - `aspect_breakdown` - Individual aspect counts
 
 Example output filename: `review_analysis_730_150_20241201_143022_grouped_aspects_20241201_144530.csv`
-
+![Screenshot 2025-05-31 at 15 41 10](https://github.com/user-attachments/assets/d1e81ffd-9cf0-4156-9011-40b5a43dd515)
