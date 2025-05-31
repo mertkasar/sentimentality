@@ -74,16 +74,16 @@ python steam_analyzer.py 730
 #### Advanced Usage:
 ```bash
 # Analyze specific number of reviews
-python steam_analyzer.py 730 --reviews 100
+python sentiment_analyzer.py 730 --reviews 100
 
 # Use different model
-python steam_analyzer.py 730 --model llama2:7b
+python sentiment_analyzer.py 730 --model llama2:7b
 
 # Use individual processing (slower but more reliable)
-python steam_analyzer.py 730 --batch-size 1
+python sentiment_analyzer.py 730 --batch-size 1
 
 # Combine multiple options
-python steam_analyzer.py 730 --reviews 500 --batch-size 10 --model mistral:instruct
+python sentiment_analyzer.py 730 --reviews 500 --batch-size 10 --model mistral:instruct
 ```
 
 #### Output:
