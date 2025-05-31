@@ -147,4 +147,5 @@ The script generates a CSV file with columns:
 - `aspect_breakdown` - Individual aspect counts
 
 Example output filename: `review_analysis_730_150_20241201_143022_grouped_aspects_20241201_144530.csv`
-![Screenshot 2025-05-31 at 15 41 10](https://github.com/user-attachments/assets/d1e81ffd-9cf0-4156-9011-40b5a43dd515)
+![Screenshot 2025-05-31 at 16 42 50](https://github.com/user-attachments/assets/811c4382-2928-42bf-a32a-eebf2bc5fe28)
+
