@@ -62,7 +62,7 @@ Fetches and analyzes Steam reviews for sentiment and aspects.
 #### Basic usage:
 ```bash
 # Analyze all reviews for a specific Steam game (using App ID)
-python steam_analyzer.py 730
+python sentiment_analyzer.py 730
 
 # Common Steam App IDs:
 # 730 = Counter-Strike 2
