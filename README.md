@@ -1,19 +1,32 @@
 # Steam Review Sentiment Analyzer
 
-A comprehensive tool for analyzing Steam game reviews using local LLM (Large Language Model) via Ollama. This project consists of two scripts:
+A comprehensive Python toolkit that leverages local Large Language Models (LLMs) via Ollama to analyze Steam game reviews. Extract sentiment, identify key aspects, and gain deep insights into player opinions with intelligent grouping and statistical analysis.
 
-1. **Steam Review Analyzer** - Fetches reviews from Steam API and performs sentiment analysis
-2. **Aspect Analyzer** - Groups and analyzes positive/negative aspects from the sentiment analysis results
+## 🎯 What it does
 
-## Features
+- **Fetches reviews** directly from Steam's API for any game
+- **Analyzes sentiment** using local AI models (no cloud dependencies)
+- **Extracts aspects** that players love or hate about games
+- **Groups similar feedback** intelligently (e.g., "graphics", "visuals", "art style")
+- **Provides statistics** and exportable CSV reports
 
-- 🎮 Fetch reviews directly from Steam API
-- 🤖 Local LLM-powered sentiment analysis using Ollama
-- 📊 Intelligent aspect grouping and counting
-- 🔄 Batch processing with fallback mechanisms
-- 📈 Detailed statistics and summaries
-- 💾 CSV output for further analysis
-- ⚙️ Configurable via environment variables
+## 🚀 Key Features
+
+🎮 **Steam API Integration** - Direct access to review data  
+🤖 **Local LLM Processing** - Privacy-focused AI analysis via Ollama  
+📊 **Intelligent Grouping** - Automatically categorizes similar aspects  
+🔄 **Batch Processing** - Efficient handling of large review datasets  
+📈 **Statistical Analysis** - Comprehensive sentiment breakdowns  
+💾 **CSV Export** - Easy data export for further analysis  
+⚙️ **Highly Configurable** - Customizable via environment variables  
+
+## 🎯 Perfect For
+
+- **Game Developers** - Understand player feedback at scale
+- **Data Analysts** - Extract insights from user-generated content
+- **Researchers** - Study gaming communities and sentiment trends
+- **Indie Developers** - Analyze competitor reviews and market sentiment
+- **Privacy-Conscious Users** - Process data locally without cloud APIs
 
 ## Prerequisites
 
