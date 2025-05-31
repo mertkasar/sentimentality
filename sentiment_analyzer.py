@@ -45,12 +45,11 @@ class SteamReviewAnalyzer:
         }
         
         # Configure Ollama client if host is specified
-        if ollama_host != "http://localhost:11434":
-            ollama.Client(host=ollama_host)
+        self.ollama_client = ollama.Client(host=ollama_host)
         
         # Test Ollama connection
         try:
-            ollama.list()
+            self.ollama_client.list()
             print(f"✓ Connected to Ollama at {ollama_host} using model: {self.model}")
         except Exception as e:
             print(f"✗ Failed to connect to Ollama at {ollama_host}: {e}")
@@ -188,7 +187,7 @@ Required JSON format (respond with ONLY this JSON, no other text):
                 
                 prompt = self.create_improved_batch_analysis_prompt(review_batch)
                 
-                response = ollama.generate(
+                response = self.ollama_client.generate(
                     model=self.model,
                     prompt=prompt,
                     stream=False,
@@ -330,7 +329,7 @@ Format your response as JSON:
 Provide only the JSON response, no additional text."""
         
         try:
-            response = ollama.generate(
+            response = self.ollama_client.generate(
                 model=self.model,
                 prompt=prompt,
                 stream=False,
