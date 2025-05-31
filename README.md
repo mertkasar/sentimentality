@@ -2,7 +2,7 @@
 
 A comprehensive Python toolkit that leverages local Large Language Models (LLMs) via Ollama to analyze Steam game reviews. Extract sentiment, identify key aspects, and gain deep insights into player opinions with intelligent grouping and statistical analysis.
 
-## 🎯 What it does
+## 🎯 How It Works
 
 - **Fetches reviews** directly from Steam's API for any game
 - **Analyzes sentiment** using local AI models (no cloud dependencies)
@@ -12,15 +12,14 @@ A comprehensive Python toolkit that leverages local Large Language Models (LLMs)
 
 ## 🚀 Key Features
 
-🎮 **Steam API Integration** - Direct access to review data  
-🤖 **Local LLM Processing** - Privacy-focused AI analysis via Ollama  
-📊 **Intelligent Grouping** - Automatically categorizes similar aspects  
-🔄 **Batch Processing** - Efficient handling of large review datasets  
-📈 **Statistical Analysis** - Comprehensive sentiment breakdowns  
-💾 **CSV Export** - Easy data export for further analysis  
-⚙️ **Highly Configurable** - Customizable via environment variables  
+- 🎮 **Steam API Integration** - Direct access to review data  
+- 🤖 **Local LLM Processing** - Privacy-focused AI analysis via Ollama  
+- 📊 **Intelligent Grouping** - Automatically categorizes similar aspects  
+- 🔄 **Batch Processing** - Efficient handling of large review datasets  
+- 📈 **Statistical Analysis** - Comprehensive sentiment breakdowns  
+- 💾 **CSV Export** - Easy data export for further analysis  
 
-## 🎯 Perfect For
+## 🎯 For
 
 - **Game Developers** - Understand player feedback at scale
 - **Data Analysts** - Extract insights from user-generated content
