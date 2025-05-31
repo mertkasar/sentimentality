@@ -114,37 +114,23 @@ Example output filename: `review_analysis_730_150_20241201_143022.csv`
 ### 2. Aspect Analyzer
 Fetches and analyzes Steam reviews for sentiment and aspects.
 
-#### Basic usage:
+#### Usage:
 ```bash
 # Analyze aspects from previous output
 python aspect_analyzer.py review_analysis_730_150_20241201_143022.csv
-```
-
-#### Advanced Usage:
-```bash
-# Specify custom output file
-python aspect_analyzer.py input.csv --output my_grouped_aspects.csv
-
-# Use larger batch size for grouping (faster but may be less accurate)
-python aspect_analyzer.py input.csv --batch-size 100
-
-# Skip the group merging step (faster processing)
-python aspect_analyzer.py input.csv --skip-merge
 
 # Use different model
 python aspect_analyzer.py input.csv --model llama2:7b
-
-# Combine options
-python aspect_analyzer.py input.csv --output results.csv --batch-size 30 --model mistral:instruct
 ```
 
 #### Output:
 The script generates a CSV file with columns:
-- `aspect_type` - "positive" or "negative"
-- `group_name` - Consolidated aspect name
-- `total_count` - Total mentions across all similar aspects
-- `individual_aspects` - All original aspects grouped together
-- `aspect_breakdown` - Individual aspect counts
+- `keyword` - categorized aspect keyword
+- `sentiment_type` - "positive" or "negative"
+- `aspect_group` - Consolidated aspect name
+- `review_count` - Total mentions across all similar aspects
+- `reviewer_ids` - Reviewer ID's triggered this keyword
+- `review_urls` - Reviewer URL triggered this keyword
 
 Example output filename: `review_analysis_730_150_20241201_143022_grouped_aspects_20241201_144530.csv`
 ![Screenshot 2025-05-31 at 16 42 50](https://github.com/user-attachments/assets/811c4382-2928-42bf-a32a-eebf2bc5fe28)

@@ -1,558 +1,408 @@
-#!/usr/bin/env python3
-"""
-Steam Review Aspect Analyzer
-Processes CSV output from sentiment analysis to group and count similar aspects
-"""
 import argparse
-import csv
+import pandas as pd
+import ollama
 import json
 import os
 import re
-import time
-from collections import Counter, defaultdict
-from datetime import datetime
-from typing import Dict, List, Tuple, Optional
-import pandas as pd
+from collections import defaultdict, Counter
 from tqdm import tqdm
-import ollama
+from colorama import init, Fore, Style
+from tabulate import tabulate
+import time
+import sys
+from typing import Dict, List, Set, Tuple
 from dotenv import load_dotenv
 
-# Load environment variables
+# Load environment variables from .env file
 load_dotenv()
 
-# Configuration
 OLLAMA_MODEL = os.getenv('OLLAMA_MODEL', 'mistral:instruct')
 OLLAMA_HOST = os.getenv('OLLAMA_HOST', 'http://localhost:11434')
-BATCH_SIZE = int(os.getenv('ASPECT_BATCH_SIZE', '50'))  # Number of aspects to group at once
 
-class AspectAnalyzer:
-    def __init__(self, model: str = OLLAMA_MODEL, ollama_host: str = OLLAMA_HOST):
+# Initialize colorama for colored output
+init()
+
+class DynamicAspectGrouper:
+    def __init__(self, input_csv_path, model: str = OLLAMA_MODEL, ollama_host: str = OLLAMA_HOST):
+        self.input_csv_path = input_csv_path
+        self.game_id = self.extract_game_id_from_filename()
+        self.df = None
+        self.keyword_data = defaultdict(lambda: {
+            'sentiment_type': None,
+            'aspect_group': None,
+            'reviewer_ids': set(),
+            'review_count': 0
+        })
+        self.aspect_groups = {
+            'positive': {},
+            'negative': {}
+        }
+
+        # Configure Ollama client if host is specified
         self.model = model
         self.ollama_host = ollama_host
-        
-        # Configure Ollama client if host is specified
-        if ollama_host != "http://localhost:11434":
-            ollama.Client(host=ollama_host)
+        self.ollama_client = ollama.Client(host=ollama_host)
         
         # Test Ollama connection
         try:
-            ollama.list()
+            self.ollama_client.list()
             print(f"✓ Connected to Ollama at {ollama_host} using model: {self.model}")
         except Exception as e:
             print(f"✗ Failed to connect to Ollama at {ollama_host}: {e}")
             print("Make sure Ollama is running and the model is pulled")
             raise
-
-    def load_csv_data(self, csv_file: str) -> pd.DataFrame:
-        """Load and validate CSV data"""
-        try:
-            df = pd.read_csv(csv_file)
-            required_columns = ['positive_aspects', 'negative_aspects']
-            
-            for col in required_columns:
-                if col not in df.columns:
-                    raise ValueError(f"Required column '{col}' not found in CSV")
-            
-            print(f"✓ Loaded {len(df)} reviews from {csv_file}")
-            return df
-            
-        except Exception as e:
-            print(f"✗ Error loading CSV file: {e}")
-            raise
-
-    def extract_aspects(self, df: pd.DataFrame) -> Tuple[List[str], List[str]]:
-        """Extract and clean individual aspects from the CSV data"""
-        positive_aspects = []
-        negative_aspects = []
         
-        print("Extracting aspects from reviews...")
+    def extract_game_id_from_filename(self):
+        """Extract game ID from filename pattern"""
+        match = re.search(r'_(\d+)_', self.input_csv_path)
+        return match.group(1) if match else '553420'
+    
+    def normalize_keyword(self, keyword: str) -> str:
+        """Convert keyword to snake_case"""
+        # Remove special characters and convert to lowercase
+        keyword = re.sub(r'[^\w\s-]', '', keyword.lower())
+        # Replace spaces and hyphens with underscores
+        keyword = re.sub(r'[-\s]+', '_', keyword)
+        # Remove leading/trailing underscores
+        return keyword.strip('_')
+    
+    def load_data(self):
+        """Load the review data from CSV"""
+        print(f"{Fore.CYAN}Loading data from {self.input_csv_path}...{Style.RESET_ALL}")
+        self.df = pd.read_csv(self.input_csv_path)
+        print(f"{Fore.GREEN}✓ Loaded {len(self.df)} reviews{Style.RESET_ALL}")
+    
+    def extract_keywords_from_reviews(self):
+        """Extract all keywords from reviews with their associated reviews"""
+        print(f"\n{Fore.CYAN}Extracting keywords from reviews...{Style.RESET_ALL}")
         
-        for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing reviews"):
-            # Process positive aspects
-            if pd.notna(row['positive_aspects']) and row['positive_aspects'].strip():
-                pos_aspects = [aspect.strip().lower() for aspect in str(row['positive_aspects']).split(',')]
-                pos_aspects = [aspect for aspect in pos_aspects if aspect and len(aspect) > 1]
-                positive_aspects.extend(pos_aspects)
-            
-            # Process negative aspects
-            if pd.notna(row['negative_aspects']) and row['negative_aspects'].strip():
-                neg_aspects = [aspect.strip().lower() for aspect in str(row['negative_aspects']).split(',')]
-                neg_aspects = [aspect for aspect in neg_aspects if aspect and len(aspect) > 1]
-                negative_aspects.extend(neg_aspects)
+        # Process positive keywords
+        for idx, row in tqdm(self.df.iterrows(), total=len(self.df), desc="Processing positive keywords"):
+            if pd.notna(row.get('positive_aspects')):
+                aspects = str(row['positive_aspects']).strip()
+                if aspects:
+                    for aspect in aspects.split(','):
+                        aspect = aspect.strip()
+                        if aspect:
+                            keyword = self.normalize_keyword(aspect)
+                            self.keyword_data[keyword]['sentiment_type'] = 'positive'
+                            self.keyword_data[keyword]['reviewer_ids'].add(str(row['reviewer_name']))
+                            self.keyword_data[keyword]['original_keyword'] = aspect
         
-        print(f"✓ Extracted {len(positive_aspects)} positive aspects and {len(negative_aspects)} negative aspects")
-        return positive_aspects, negative_aspects
-
-    def get_initial_counts(self, aspects: List[str]) -> Dict[str, int]:
-        """Get initial counts of exact aspect matches"""
-        return dict(Counter(aspects))
-
-    def create_grouping_prompt(self, aspects_batch: List[str]) -> str:
-        """Create a prompt for grouping similar aspects"""
-        aspects_list = "\n".join([f'"{aspect}"' for aspect in aspects_batch])
+        # Process negative keywords
+        for idx, row in tqdm(self.df.iterrows(), total=len(self.df), desc="Processing negative keywords"):
+            if pd.notna(row.get('negative_aspects')):
+                aspects = str(row['negative_aspects']).strip()
+                if aspects:
+                    for aspect in aspects.split(','):
+                        aspect = aspect.strip()
+                        if aspect:
+                            keyword = self.normalize_keyword(aspect)
+                            self.keyword_data[keyword]['sentiment_type'] = 'negative'
+                            self.keyword_data[keyword]['reviewer_ids'].add(str(row['reviewer_name']))
+                            self.keyword_data[keyword]['original_keyword'] = aspect
         
-        prompt = f"""You must group ALL of these {len(aspects_batch)} game review aspects. Every single aspect must appear in exactly one group.
-
-ASPECTS TO GROUP:
-{aspects_list}
-
-INSTRUCTIONS:
-1. Read through ALL {len(aspects_batch)} aspects carefully
-2. Group similar aspects together
-3. Choose ONE existing aspect as the group name (the clearest/most representative one)
-4. Every aspect must be included - do not skip any
-5. Copy aspect text exactly as written, including quotes if present
-
-EXAMPLE FORMAT:
-{{
-    "groups": [
+        # Update review counts
+        for keyword in self.keyword_data:
+            self.keyword_data[keyword]['review_count'] = len(self.keyword_data[keyword]['reviewer_ids'])
+        
+        print(f"{Fore.GREEN}✓ Found {len(self.keyword_data)} unique keywords{Style.RESET_ALL}")
+    
+    def discover_aspect_groups(self):
+        """Use Ollama to discover aspect groups for keywords"""
+        print(f"\n{Fore.CYAN}Discovering aspect groups for keywords...{Style.RESET_ALL}")
+        
+        # Separate keywords by sentiment
+        positive_keywords = {}
+        negative_keywords = {}
+        
+        for keyword, data in self.keyword_data.items():
+            original = data.get('original_keyword', keyword)
+            if data['sentiment_type'] == 'positive':
+                positive_keywords[original] = data['review_count']
+            else:
+                negative_keywords[original] = data['review_count']
+        
+        # Get aspect groups for positive keywords
+        if positive_keywords:
+            self.aspect_groups['positive'] = self.get_aspect_groups_from_ollama(
+                positive_keywords, 'positive'
+            )
+        
+        # Get aspect groups for negative keywords
+        if negative_keywords:
+            self.aspect_groups['negative'] = self.get_aspect_groups_from_ollama(
+                negative_keywords, 'negative'
+            )
+        
+        # Assign groups to keywords
+        self.assign_groups_to_keywords()
+    
+    def get_aspect_groups_from_ollama(self, keywords_with_counts: Dict[str, int], sentiment_type: str) -> Dict[str, List[str]]:
+        """Use Ollama to create aspect groups"""
+        keywords_list = [f"{kw} ({count})" for kw, count in sorted(keywords_with_counts.items(), 
+                                                                   key=lambda x: x[1], reverse=True)]
+        
+        prompt = f"""
+        Analyze these {sentiment_type} game review keywords and group them into natural categories.
+        Create groups based on what aspects of the game they relate to.
+        
+        Keywords (with review counts):
+        {', '.join(keywords_list)}
+        
+        Instructions:
+        1. Create logical groups based on game aspects (e.g., visual elements, gameplay mechanics, technical issues)
+        2. Group names should be in snake_case (e.g., visual_presentation, gameplay_mechanics)
+        3. Each keyword should belong to exactly one group
+        4. Create as many groups as needed to properly categorize all keywords
+        
+        Return ONLY a JSON object where keys are snake_case group names and values are lists of keywords.
+        Example:
         {{
-            "group_name": "graphics are stunning",
-            "aspects": ["graphics are stunning", "visuals look amazing"]
-        }},
-        {{
-            "group_name": "story is boring", 
-            "aspects": ["story is boring"]
+            "visual_presentation": ["graphics", "art style", "visuals"],
+            "gameplay_mechanics": ["gameplay", "controls", "combat"],
+            "technical_performance": ["bugs", "crashes", "performance"]
         }}
-    ]
-}}
-
-CRITICAL REQUIREMENTS:
-- Include ALL {len(aspects_batch)} aspects
-- Use exact text from the list above
-- Each aspect appears in exactly one group
-- Group name must be one of the aspects in that group
-
-Return ONLY the JSON, no explanations."""
-        
-        return prompt
-
-    def group_aspects_batch(self, aspects_batch: List[str], max_retries: int = 3) -> Optional[List[Dict]]:
-        """Group a batch of aspects using LLM with retry logic"""
-        
-        for attempt in range(max_retries):
-            try:
-                if attempt > 0:
-                    print(f"  Retry attempt {attempt + 1}/{max_retries}...")
-                    time.sleep(1)
-                
-                prompt = self.create_grouping_prompt(aspects_batch)
-                
-                response = ollama.generate(
-                    model=self.model,
-                    prompt=prompt,
-                    stream=False,
-                    options={
-                        'temperature': 0.05,  # Very low for consistency
-                        'top_p': 0.9,
-                        'max_tokens': 6000,
-                        'num_ctx': 16384,  # Large context
-                        'repeat_penalty': 1.05,
-                    }
-                )
-                
-                response_text = response['response'].strip()
-                
-                # Extract JSON more robustly
-                json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-                if not json_match:
-                    if attempt < max_retries - 1:
-                        print(f"    No JSON found in response")
-                    continue
-                
-                json_str = json_match.group(0)
-                
-                # Clean common JSON issues
-                json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)  # Remove trailing commas
-                json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)  # Remove control chars
-                
-                result = json.loads(json_str)
-                
-                if 'groups' not in result or not isinstance(result['groups'], list):
-                    if attempt < max_retries - 1:
-                        print(f"    Invalid JSON structure")
-                    continue
-                
-                # Enhanced validation with detailed feedback
-                all_found_aspects = []
-                valid_groups = []
-                
-                for i, group in enumerate(result['groups']):
-                    if not isinstance(group, dict):
-                        continue
-                    if 'group_name' not in group or 'aspects' not in group:
-                        continue
-                    if not isinstance(group['aspects'], list):
-                        continue
-                    
-                    # Clean aspect text (remove extra quotes, whitespace)
-                    cleaned_aspects = []
-                    for aspect in group['aspects']:
-                        cleaned = aspect.strip().strip('"\'')
-                        cleaned_aspects.append(cleaned)
-                    
-                    group['aspects'] = cleaned_aspects
-                    group_name = group['group_name'].strip().strip('"\'')
-                    group['group_name'] = group_name
-                    
-                    # Validate group_name is one of the aspects
-                    if group_name not in group['aspects']:
-                        if attempt < max_retries - 1:
-                            print(f"    Group {i+1}: '{group_name}' not in its aspects")
-                        continue
-                    
-                    all_found_aspects.extend(group['aspects'])
-                    valid_groups.append(group)
-                
-                # Detailed validation
-                original_set = set(aspects_batch)
-                found_set = set(all_found_aspects)
-                
-                missing = original_set - found_set
-                extra = found_set - original_set
-                duplicates = len(all_found_aspects) - len(found_set)
-                
-                if len(missing) == 0 and len(extra) == 0 and duplicates == 0 and len(valid_groups) > 0:
-                    return valid_groups
-                
-                # Detailed error reporting
-                if attempt < max_retries - 1:
-                    issues = []
-                    if missing: 
-                        issues.append(f"Missing: {len(missing)}")
-                        if len(missing) <= 3:  # Show a few examples
-                            issues.append(f"Examples: {list(missing)[:3]}")
-                    if extra: 
-                        issues.append(f"Extra: {len(extra)}")
-                        if len(extra) <= 3:
-                            issues.append(f"Examples: {list(extra)[:3]}")
-                    if duplicates: 
-                        issues.append(f"Duplicates: {duplicates}")
-                    
-                    print(f"    Validation failed - {', '.join(issues)}")
-                    
-                    # Try to fix missing aspects by adding them as individual groups
-                    if len(missing) <= 3 and len(extra) == 0 and duplicates == 0:
-                        print(f"    Attempting to fix by adding missing aspects...")
-                        for missing_aspect in missing:
-                            valid_groups.append({
-                                "group_name": missing_aspect,
-                                "aspects": [missing_aspect]
-                            })
-                        return valid_groups
-                
-            except json.JSONDecodeError as e:
-                if attempt < max_retries - 1:
-                    print(f"    JSON parse error: {str(e)[:100]}...")
-                continue
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    print(f"    Error: {str(e)[:100]}...")
-                continue
-        
-        print(f"  Failed to group batch after {max_retries} attempts")
-        print(f"  Batch size: {len(aspects_batch)}")
-        print(f"  Sample aspects: {aspects_batch[:3]}")
-        
-        # Return individual groups as fallback
-        return [{"group_name": aspect, "aspects": [aspect]} for aspect in aspects_batch]
-
-    def group_similar_aspects(self, aspect_counts: Dict[str, int], aspect_type: str) -> Dict[str, Dict]:
-        """Group similar aspects using LLM processing"""
-        print(f"\nGrouping similar {aspect_type} aspects...")
-        
-        # Sort aspects by frequency (most common first) for better grouping
-        sorted_aspects = sorted(aspect_counts.keys(), key=lambda x: aspect_counts[x], reverse=True)
-        
-        # Process in batches
-        all_groups = []
-        total_batches = (len(sorted_aspects) + BATCH_SIZE - 1) // BATCH_SIZE
-        
-        for i in tqdm(range(0, len(sorted_aspects), BATCH_SIZE), 
-                     desc=f"Grouping {aspect_type} aspects", total=total_batches):
-            batch = sorted_aspects[i:i + BATCH_SIZE]
-            groups = self.group_aspects_batch(batch)
-            if groups:
-                all_groups.extend(groups)
-            
-            # Small delay between batches
-            time.sleep(0.1)
-        
-        # Consolidate groups and calculate counts
-        final_groups = {}
-        for group in all_groups:
-            group_name = group['group_name']
-            total_count = sum(aspect_counts.get(aspect, 0) for aspect in group['aspects'])
-            
-            final_groups[group_name] = {
-                'count': total_count,
-                'aspects': group['aspects'],
-                'aspect_counts': {aspect: aspect_counts.get(aspect, 0) for aspect in group['aspects']}
-            }
-        
-        # Sort by total count (descending)
-        final_groups = dict(sorted(final_groups.items(), key=lambda x: x[1]['count'], reverse=True))
-        
-        return final_groups
-
-    def merge_similar_groups(self, grouped_aspects: Dict[str, Dict], aspect_type: str) -> Dict[str, Dict]:
-        """Perform a second pass to merge groups that might be similar"""
-        print(f"\nPerforming second pass to merge similar {aspect_type} groups...")
-        
-        group_names = list(grouped_aspects.keys())
-        if len(group_names) <= 1:
-            return grouped_aspects
-        
-        # Create prompt to identify similar groups
-        groups_list = "\n".join([f"{i+1}. {name} (count: {grouped_aspects[name]['count']})" 
-                                for i, name in enumerate(group_names)])
-        
-        prompt = f"""Task: Identify groups that should be merged because they refer to the same concept.
-
-GROUPS TO REVIEW:
-{groups_list}
-
-RULES:
-1. Only merge groups about the SAME concept
-2. Be conservative - when unsure, keep separate
-3. Use one of the existing group names as the merge target
-4. Don't create new names
-
-REQUIRED JSON FORMAT:
-{{
-    "merges": [
-        {{
-            "merge_into": "existing group name to keep",
-            "groups_to_merge": ["group1", "group2"]
-        }}
-    ]
-}}
-
-If no merges needed: {{"merges": []}}
-
-Return ONLY valid JSON, no other text."""
+        """
         
         try:
-            response = ollama.generate(
+            response = self.ollama_client.chat(
                 model=self.model,
-                prompt=prompt,
-                stream=False,
-                options={
-                    'temperature': 0.05,  # Very low temperature for consistency
-                    'max_tokens': 2000,
-                    'num_ctx': 4096
-                }
+                messages=[{'role': 'user', 'content': prompt}],
+                options={'temperature': 0.3}
             )
             
-            response_text = response['response'].strip()
+            response_text = response['message']['content']
+            json_match = re.search(r'\{[\s\S]*\}', response_text)
             
-            # Robust JSON extraction
-            json_start = response_text.find('{')
-            json_end = response_text.rfind('}') + 1
-            
-            if json_start >= 0 and json_end > json_start:
-                json_str = response_text[json_start:json_end]
-                json_str = re.sub(r',\s*}', '}', json_str)
-                json_str = re.sub(r',\s*]', ']', json_str)
+            if json_match:
+                groups = json.loads(json_match.group())
                 
-                result = json.loads(json_str)
-                merges = result.get('merges', [])
+                # Normalize group names to snake_case
+                normalized_groups = {}
+                for group_name, keywords in groups.items():
+                    normalized_name = self.normalize_keyword(group_name)
+                    normalized_groups[normalized_name] = keywords
                 
-                # Apply merges with validation
-                applied_merges = 0
-                for merge in merges:
-                    if not isinstance(merge, dict):
-                        continue
-                    if 'merge_into' not in merge or 'groups_to_merge' not in merge:
-                        continue
-                        
-                    target_name = merge['merge_into']
-                    groups_to_merge = merge['groups_to_merge']
-                    
-                    if not isinstance(groups_to_merge, list):
-                        continue
-                    
-                    if target_name in groups_to_merge and target_name in grouped_aspects:
-                        # Merge all other groups into the target
-                        target_data = grouped_aspects[target_name]
-                        
-                        for group_name in groups_to_merge:
-                            if group_name != target_name and group_name in grouped_aspects:
-                                source_data = grouped_aspects[group_name]
-                                
-                                # Merge the data
-                                target_data['count'] += source_data['count']
-                                target_data['aspects'].extend(source_data['aspects'])
-                                target_data['aspect_counts'].update(source_data['aspect_counts'])
-                                
-                                # Remove the merged group
-                                del grouped_aspects[group_name]
-                                applied_merges += 1
-                
-                # Re-sort by count
-                grouped_aspects = dict(sorted(grouped_aspects.items(), 
-                                            key=lambda x: x[1]['count'], reverse=True))
-                
-                print(f"✓ Applied {applied_merges} group merges")
+                return normalized_groups
+            else:
+                raise ValueError("No valid JSON found")
                 
         except Exception as e:
-            print(f"⚠ Warning: Could not perform group merging: {e}")
+            print(f"{Fore.YELLOW}Warning: Ollama grouping failed: {e}{Style.RESET_ALL}")
+            return self.fallback_grouping(list(keywords_with_counts.keys()))
+    
+    def fallback_grouping(self, keywords: List[str]) -> Dict[str, List[str]]:
+        """Simple fallback grouping"""
+        groups = defaultdict(list)
         
-        return grouped_aspects
-
-    def save_results(self, positive_groups: Dict, negative_groups: Dict, output_file: str):
-        """Save grouped aspects to CSV file"""
-        results = []
+        # Basic keyword-based grouping
+        grouping_rules = {
+            'visual_elements': ['graphic', 'visual', 'art', 'aesthetic', 'design', 'animation'],
+            'gameplay_mechanics': ['gameplay', 'mechanic', 'control', 'combat', 'puzzle', 'exploration'],
+            'story_content': ['story', 'narrative', 'character', 'plot', 'dialogue', 'lore'],
+            'technical_aspects': ['performance', 'bug', 'crash', 'optimization', 'lag', 'fps', 'glitch'],
+            'audio_elements': ['music', 'sound', 'audio', 'soundtrack', 'voice'],
+            'value_pricing': ['price', 'worth', 'value', 'cost', 'expensive', 'cheap', 'money'],
+            'community_social': ['community', 'multiplayer', 'player', 'toxic', 'communication', 'online'],
+        }
         
-        # Add positive aspects
-        for group_name, data in positive_groups.items():
-            results.append({
-                'aspect_type': 'positive',
-                'group_name': group_name,
-                'total_count': data['count'],
-                'individual_aspects': ', '.join(data['aspects']),
-                'aspect_breakdown': ', '.join([f"{aspect}({count})" 
-                                             for aspect, count in data['aspect_counts'].items()])
+        for keyword in keywords:
+            keyword_lower = keyword.lower()
+            grouped = False
+            
+            for group_name, triggers in grouping_rules.items():
+                if any(trigger in keyword_lower for trigger in triggers):
+                    groups[group_name].append(keyword)
+                    grouped = True
+                    break
+            
+            if not grouped:
+                groups['other_aspects'].append(keyword)
+        
+        return dict(groups)
+    
+    def assign_groups_to_keywords(self):
+        """Assign aspect groups to keywords"""
+        for keyword, data in self.keyword_data.items():
+            original_keyword = data.get('original_keyword', keyword)
+            sentiment = data['sentiment_type']
+            
+            # Find which group this keyword belongs to
+            group_found = False
+            if sentiment in self.aspect_groups:
+                for group_name, group_keywords in self.aspect_groups[sentiment].items():
+                    if original_keyword in group_keywords:
+                        self.keyword_data[keyword]['aspect_group'] = group_name
+                        group_found = True
+                        break
+            
+            if not group_found:
+                self.keyword_data[keyword]['aspect_group'] = 'ungrouped'
+    
+    def create_keyword_dataframe(self) -> pd.DataFrame:
+        """Create a DataFrame with keyword-level data"""
+        keyword_rows = []
+        
+        for keyword, data in self.keyword_data.items():
+            # Generate review URLs
+            review_urls = [
+                f"https://steamcommunity.com/profiles/{reviewer_id}/recommended/{self.game_id}/"
+                for reviewer_id in sorted(data['reviewer_ids'])
+            ]
+            
+            keyword_rows.append({
+                'keyword': keyword,
+                'original_keyword': data.get('original_keyword', keyword),
+                'sentiment_type': data['sentiment_type'],
+                'aspect_group': data['aspect_group'],
+                'review_count': data['review_count'],
+                'reviewer_ids': ', '.join(sorted(data['reviewer_ids'])),
+                'review_urls': ' | '.join(review_urls)
             })
         
-        # Add negative aspects
-        for group_name, data in negative_groups.items():
-            results.append({
-                'aspect_type': 'negative',
-                'group_name': group_name,
-                'total_count': data['count'],
-                'individual_aspects': ', '.join(data['aspects']),
-                'aspect_breakdown': ', '.join([f"{aspect}({count})" 
-                                             for aspect, count in data['aspect_counts'].items()])
-            })
+        # Create DataFrame and sort by review count
+        df = pd.DataFrame(keyword_rows)
+        df = df.sort_values(['sentiment_type', 'review_count'], ascending=[True, False])
         
-        # Create output directory if needed
-        output_dir = os.path.dirname(output_file) if os.path.dirname(output_file) else '.'
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+        return df
+    
+    def display_summary(self, output_df: pd.DataFrame):
+        """Display keyword analysis summary"""
+        print("\n" + "="*70)
+        print(f"{Fore.CYAN}📊 KEYWORD ANALYSIS SUMMARY{Style.RESET_ALL}")
+        print("="*70)
         
-        # Save to CSV
-        fieldnames = ['aspect_type', 'group_name', 'total_count', 'individual_aspects', 'aspect_breakdown']
-        with open(output_file, 'w', newline='', encoding='utf-8') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(results)
+        # Separate by sentiment
+        positive_df = output_df[output_df['sentiment_type'] == 'positive']
+        negative_df = output_df[output_df['sentiment_type'] == 'negative']
         
-        print(f"\n✓ Saved grouped aspects to {output_file}")
-
-    def print_summary(self, positive_groups: Dict, negative_groups: Dict):
-        """Print a summary of the grouped aspects"""
-        print("\n" + "="*60)
-        print("📊 ASPECT GROUPING SUMMARY")
-        print("="*60)
+        # Top positive keywords
+        print(f"\n{Fore.GREEN}✅ TOP POSITIVE KEYWORDS:{Style.RESET_ALL}")
+        print("-" * 70)
+        print(f"{'#':<3} {'Keyword':<25} {'Group':<25} {'Reviews':<10}")
+        print("-" * 70)
         
-        print(f"\n🟢 TOP POSITIVE ASPECTS:")
-        print("-" * 30)
-        for i, (group_name, data) in enumerate(list(positive_groups.items())[:10], 1):
-            aspects_preview = ', '.join(data['aspects'][:3])
-            if len(data['aspects']) > 3:
-                aspects_preview += f" (+{len(data['aspects'])-3} more)"
-            print(f"{i:2d}. {group_name:<20} ({data['count']:3d}) - {aspects_preview}")
+        for idx, row in positive_df.head(15).iterrows():
+            print(f"{idx+1:<3} {row['keyword']:<25} {row['aspect_group']:<25} {row['review_count']:<10}")
         
-        print(f"\n🔴 TOP NEGATIVE ASPECTS:")
-        print("-" * 30)
-        for i, (group_name, data) in enumerate(list(negative_groups.items())[:10], 1):
-            aspects_preview = ', '.join(data['aspects'][:3])
-            if len(data['aspects']) > 3:
-                aspects_preview += f" (+{len(data['aspects'])-3} more)"
-            print(f"{i:2d}. {group_name:<20} ({data['count']:3d}) - {aspects_preview}")
+        # Top negative keywords
+        print(f"\n{Fore.RED}❌ TOP NEGATIVE KEYWORDS:{Style.RESET_ALL}")
+        print("-" * 70)
+        print(f"{'#':<3} {'Keyword':<25} {'Group':<25} {'Reviews':<10}")
+        print("-" * 70)
         
-        print(f"\n📈 STATISTICS:")
-        print("-" * 15)
-        print(f"Total positive groups: {len(positive_groups)}")
-        print(f"Total negative groups: {len(negative_groups)}")
-        print(f"Total positive mentions: {sum(data['count'] for data in positive_groups.values())}")
-        print(f"Total negative mentions: {sum(data['count'] for data in negative_groups.values())}")
+        for idx, row in negative_df.head(15).iterrows():
+            print(f"{idx+1:<3} {row['keyword']:<25} {row['aspect_group']:<25} {row['review_count']:<10}")
+        
+        # Statistics by aspect group
+        print(f"\n{Fore.BLUE}📈 STATISTICS BY ASPECT GROUP:{Style.RESET_ALL}")
+        print("-" * 70)
+        
+        group_stats = output_df.groupby(['sentiment_type', 'aspect_group']).agg({
+            'keyword': 'count',
+            'review_count': 'sum'
+        }).rename(columns={'keyword': 'keyword_count', 'review_count': 'total_reviews'})
+        
+        print(group_stats.to_string())
+        
+        # Overall statistics
+        print(f"\n{Fore.YELLOW}📊 OVERALL STATISTICS:{Style.RESET_ALL}")
+        print("-" * 70)
+        print(f"Total unique keywords: {len(output_df)}")
+        print(f"Positive keywords: {len(positive_df)}")
+        print(f"Negative keywords: {len(negative_df)}")
+        print(f"Total positive mentions: {positive_df['review_count'].sum()}")
+        print(f"Total negative mentions: {negative_df['review_count'].sum()}")
+        
+        # Most discussed aspect groups
+        print(f"\n{Fore.CYAN}🏆 MOST DISCUSSED ASPECT GROUPS:{Style.RESET_ALL}")
+        print("-" * 70)
+        
+        group_totals = output_df.groupby('aspect_group')['review_count'].sum().sort_values(ascending=False)
+        for group, count in group_totals.head(10).items():
+            sentiment_info = output_df[output_df['aspect_group'] == group]['sentiment_type'].value_counts()
+            sentiment_str = f"[+{sentiment_info.get('positive', 0)}/-{sentiment_info.get('negative', 0)}]"
+            print(f"{group:<35} {count:>5} reviews {sentiment_str}")
+    
+    def save_results(self, output_df: pd.DataFrame, output_path: str):
+        """Save results to CSV"""
+        output_df.to_csv(output_path, index=False)
+        print(f"\n{Fore.GREEN}✓ Results saved to {output_path}{Style.RESET_ALL}")
+        
+        # Also save a summary file
+        summary_path = output_path.replace('.csv', '_summary.txt')
+        with open(summary_path, 'w', encoding='utf-8') as f:
+            # Redirect print output to file
+            original_stdout = sys.stdout
+            sys.stdout = f
+            self.display_summary(output_df)
+            sys.stdout = original_stdout
+        
+        print(f"{Fore.GREEN}✓ Summary saved to {summary_path}{Style.RESET_ALL}")
+    
+    def run(self, output_path='keyword_analysis.csv'):
+        """Run the complete keyword analysis"""
+        start_time = time.time()
+        
+        try:
+            # Load data
+            self.load_data()
+            
+            # Extract keywords from reviews
+            self.extract_keywords_from_reviews()
+            
+            # Discover aspect groups
+            self.discover_aspect_groups()
+            
+            # Create output DataFrame
+            print(f"\n{Fore.CYAN}Creating keyword analysis DataFrame...{Style.RESET_ALL}")
+            output_df = self.create_keyword_dataframe()
+            
+            # Display summary
+            self.display_summary(output_df)
+            
+            # Save results
+            self.save_results(output_df, output_path)
+            
+            # Processing time
+            elapsed_time = time.time() - start_time
+            print(f"\n⏱️ Total processing time: {elapsed_time:.1f} seconds")
+            
+        except Exception as e:
+            print(f"\n{Fore.RED}❌ Error: {e}{Style.RESET_ALL}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
 def main():
-    parser = argparse.ArgumentParser(description='Group and analyze aspects from Steam review sentiment analysis')
-    parser.add_argument('csv_file', type=str, help='Path to CSV file from sentiment analysis')
-    parser.add_argument('--output', type=str, default=None,
-                       help='Output CSV file path (default: auto-generated)')
-    parser.add_argument('--model', type=str, default=OLLAMA_MODEL,
-                       help=f'Ollama model to use (default: {OLLAMA_MODEL})')
-    parser.add_argument('--batch-size', type=int, default=BATCH_SIZE,
-                       help=f'Batch size for aspect grouping (default: {BATCH_SIZE})')
-    parser.add_argument('--skip-merge', action='store_true',
-                       help='Skip the second pass group merging step')
-    
+    parser = argparse.ArgumentParser(description='Analyze Steam game reviews using local LLM')
+    parser.add_argument('reviews', type=str, help='Review .csv path to analyze')
+    parser.add_argument('--model', type=str, default=None, 
+                help=f'Ollama model to use (default: from env or {OLLAMA_MODEL})')
     args = parser.parse_args()
+
+    model = args.model or OLLAMA_MODEL
+
+    # Construct input and output paths
+    input_csv = f"output/{args.reviews}"
     
-    # Generate output filename if not provided
-    if args.output is None:
-        base_name = os.path.splitext(os.path.basename(args.csv_file))[0]
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        args.output = f"{base_name}_grouped_aspects_{timestamp}.csv"
+    # Generate output filename by adding '_aspects' before the extension
+    filename_parts = args.reviews.rsplit('.', 1)
+    if len(filename_parts) == 2:
+        output_filename = f"{filename_parts[0]}_aspects.{filename_parts[1]}"
+    else:
+        output_filename = f"{args.reviews}_aspects"
+    output_csv = f"output/{output_filename}"
     
-    # Initialize analyzer
+    # Create and run analyzer
     try:
-        analyzer = AspectAnalyzer(args.model)
+        analyzer = DynamicAspectGrouper(input_csv, model, OLLAMA_HOST)
     except Exception as e:
         print(f"Failed to initialize analyzer: {e}")
         return
-    
-    start_time = time.time()
-    
-    try:
-        # Load CSV data
-        print("\n" + "="*50)
-        print("LOADING DATA")
-        print("="*50)
-        df = analyzer.load_csv_data(args.csv_file)
-        
-        # Extract aspects
-        print("\n" + "="*50)
-        print("EXTRACTING ASPECTS")
-        print("="*50)
-        positive_aspects, negative_aspects = analyzer.extract_aspects(df)
-        
-        # Get initial counts
-        positive_counts = analyzer.get_initial_counts(positive_aspects)
-        negative_counts = analyzer.get_initial_counts(negative_aspects)
-        
-        print(f"✓ Found {len(positive_counts)} unique positive aspects")
-        print(f"✓ Found {len(negative_counts)} unique negative aspects")
-        
-        # Group positive aspects
-        print("\n" + "="*50)
-        print("GROUPING POSITIVE ASPECTS")
-        print("="*50)
-        positive_groups = analyzer.group_similar_aspects(positive_counts, "positive")
-        
-        # Group negative aspects
-        print("\n" + "="*50)
-        print("GROUPING NEGATIVE ASPECTS")
-        print("="*50)
-        negative_groups = analyzer.group_similar_aspects(negative_counts, "negative")
-        
-        # Optional second pass merging
-        if not args.skip_merge:
-            print("\n" + "="*50)
-            print("MERGING SIMILAR GROUPS")
-            print("="*50)
-            positive_groups = analyzer.merge_similar_groups(positive_groups, "positive")
-            negative_groups = analyzer.merge_similar_groups(negative_groups, "negative")
-        
-        # Save results
-        print("\n" + "="*50)
-        print("SAVING RESULTS")
-        print("="*50)
-        analyzer.save_results(positive_groups, negative_groups, args.output)
-        
-        # Print summary
-        analyzer.print_summary(positive_groups, negative_groups)
-        
-        total_time = time.time() - start_time
-        print(f"\n⏱️  Total processing time: {total_time:.1f} seconds")
-        
-    except Exception as e:
-        print(f"\n✗ Error during processing: {e}")
-        return
+
+    analyzer.run(output_csv)
 
 if __name__ == "__main__":
     main()
