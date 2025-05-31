@@ -89,35 +89,41 @@ class AspectAnalyzer:
 
     def create_grouping_prompt(self, aspects_batch: List[str]) -> str:
         """Create a prompt for grouping similar aspects"""
-        aspects_list = "\n".join([f"{i+1}. {aspect}" for i, aspect in enumerate(aspects_batch)])
+        aspects_list = "\n".join([f'"{aspect}"' for aspect in aspects_batch])
         
-        prompt = f"""You are analyzing game review aspects. Group the following aspects that have similar meanings together. 
+        prompt = f"""You must group ALL of these {len(aspects_batch)} game review aspects. Every single aspect must appear in exactly one group.
 
-Aspects to group:
+ASPECTS TO GROUP:
 {aspects_list}
 
-Instructions:
-1. Group aspects that refer to the same concept (e.g., "graphics", "visuals", "art style" should be grouped)
-2. Choose the most representative/common term as the group name
-3. Only group aspects that are truly similar in meaning
-4. Each aspect should appear in exactly one group
-5. If an aspect is unique, it can be its own group
+INSTRUCTIONS:
+1. Read through ALL {len(aspects_batch)} aspects carefully
+2. Group similar aspects together
+3. Choose ONE existing aspect as the group name (the clearest/most representative one)
+4. Every aspect must be included - do not skip any
+5. Copy aspect text exactly as written, including quotes if present
 
-Format your response as JSON:
+EXAMPLE FORMAT:
 {{
     "groups": [
         {{
-            "group_name": "graphics",
-            "aspects": ["graphics", "visuals", "art style", "visual design"]
+            "group_name": "graphics are stunning",
+            "aspects": ["graphics are stunning", "visuals look amazing"]
         }},
         {{
-            "group_name": "gameplay",
-            "aspects": ["gameplay", "mechanics", "game mechanics"]
+            "group_name": "story is boring", 
+            "aspects": ["story is boring"]
         }}
     ]
 }}
 
-Provide ONLY the JSON response, no additional text."""
+CRITICAL REQUIREMENTS:
+- Include ALL {len(aspects_batch)} aspects
+- Use exact text from the list above
+- Each aspect appears in exactly one group
+- Group name must be one of the aspects in that group
+
+Return ONLY the JSON, no explanations."""
         
         return prompt
 
@@ -137,44 +143,117 @@ Provide ONLY the JSON response, no additional text."""
                     prompt=prompt,
                     stream=False,
                     options={
-                        'temperature': float(os.getenv('LLM_TEMPERATURE', '0.2')),
+                        'temperature': 0.05,  # Very low for consistency
                         'top_p': 0.9,
-                        'max_tokens': 3000,
-                        'num_ctx': 4096
+                        'max_tokens': 6000,
+                        'num_ctx': 16384,  # Large context
+                        'repeat_penalty': 1.05,
                     }
                 )
                 
                 response_text = response['response'].strip()
                 
-                # Extract JSON from response
+                # Extract JSON more robustly
                 json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group()
-                    result = json.loads(json_str)
+                if not json_match:
+                    if attempt < max_retries - 1:
+                        print(f"    No JSON found in response")
+                    continue
+                
+                json_str = json_match.group(0)
+                
+                # Clean common JSON issues
+                json_str = re.sub(r',(\s*[}\]])', r'\1', json_str)  # Remove trailing commas
+                json_str = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', json_str)  # Remove control chars
+                
+                result = json.loads(json_str)
+                
+                if 'groups' not in result or not isinstance(result['groups'], list):
+                    if attempt < max_retries - 1:
+                        print(f"    Invalid JSON structure")
+                    continue
+                
+                # Enhanced validation with detailed feedback
+                all_found_aspects = []
+                valid_groups = []
+                
+                for i, group in enumerate(result['groups']):
+                    if not isinstance(group, dict):
+                        continue
+                    if 'group_name' not in group or 'aspects' not in group:
+                        continue
+                    if not isinstance(group['aspects'], list):
+                        continue
                     
-                    if 'groups' in result and isinstance(result['groups'], list):
-                        # Validate that all aspects are accounted for
-                        grouped_aspects = set()
-                        for group in result['groups']:
-                            if 'aspects' in group:
-                                grouped_aspects.update(group['aspects'])
-                        
-                        original_aspects = set(aspects_batch)
-                        if grouped_aspects == original_aspects:
-                            return result['groups']
-                        else:
-                            missing = original_aspects - grouped_aspects
-                            extra = grouped_aspects - original_aspects
-                            if attempt < max_retries - 1:
-                                print(f"    Validation failed - Missing: {missing}, Extra: {extra}")
-                            continue
+                    # Clean aspect text (remove extra quotes, whitespace)
+                    cleaned_aspects = []
+                    for aspect in group['aspects']:
+                        cleaned = aspect.strip().strip('"\'')
+                        cleaned_aspects.append(cleaned)
                     
-            except (json.JSONDecodeError, KeyError, Exception) as e:
+                    group['aspects'] = cleaned_aspects
+                    group_name = group['group_name'].strip().strip('"\'')
+                    group['group_name'] = group_name
+                    
+                    # Validate group_name is one of the aspects
+                    if group_name not in group['aspects']:
+                        if attempt < max_retries - 1:
+                            print(f"    Group {i+1}: '{group_name}' not in its aspects")
+                        continue
+                    
+                    all_found_aspects.extend(group['aspects'])
+                    valid_groups.append(group)
+                
+                # Detailed validation
+                original_set = set(aspects_batch)
+                found_set = set(all_found_aspects)
+                
+                missing = original_set - found_set
+                extra = found_set - original_set
+                duplicates = len(all_found_aspects) - len(found_set)
+                
+                if len(missing) == 0 and len(extra) == 0 and duplicates == 0 and len(valid_groups) > 0:
+                    return valid_groups
+                
+                # Detailed error reporting
                 if attempt < max_retries - 1:
-                    print(f"    Error on attempt {attempt + 1}: {str(e)[:100]}...")
+                    issues = []
+                    if missing: 
+                        issues.append(f"Missing: {len(missing)}")
+                        if len(missing) <= 3:  # Show a few examples
+                            issues.append(f"Examples: {list(missing)[:3]}")
+                    if extra: 
+                        issues.append(f"Extra: {len(extra)}")
+                        if len(extra) <= 3:
+                            issues.append(f"Examples: {list(extra)[:3]}")
+                    if duplicates: 
+                        issues.append(f"Duplicates: {duplicates}")
+                    
+                    print(f"    Validation failed - {', '.join(issues)}")
+                    
+                    # Try to fix missing aspects by adding them as individual groups
+                    if len(missing) <= 3 and len(extra) == 0 and duplicates == 0:
+                        print(f"    Attempting to fix by adding missing aspects...")
+                        for missing_aspect in missing:
+                            valid_groups.append({
+                                "group_name": missing_aspect,
+                                "aspects": [missing_aspect]
+                            })
+                        return valid_groups
+                
+            except json.JSONDecodeError as e:
+                if attempt < max_retries - 1:
+                    print(f"    JSON parse error: {str(e)[:100]}...")
+                continue
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    print(f"    Error: {str(e)[:100]}...")
                 continue
         
-        print(f"  Failed to group batch after {max_retries} attempts, keeping aspects separate")
+        print(f"  Failed to group batch after {max_retries} attempts")
+        print(f"  Batch size: {len(aspects_batch)}")
+        print(f"  Sample aspects: {aspects_batch[:3]}")
+        
         # Return individual groups as fallback
         return [{"group_name": aspect, "aspects": [aspect]} for aspect in aspects_batch]
 
@@ -228,28 +307,30 @@ Provide ONLY the JSON response, no additional text."""
         groups_list = "\n".join([f"{i+1}. {name} (count: {grouped_aspects[name]['count']})" 
                                 for i, name in enumerate(group_names)])
         
-        prompt = f"""Review these {aspect_type} aspect groups and identify any that should be merged because they refer to the same concept:
+        prompt = f"""Task: Identify groups that should be merged because they refer to the same concept.
 
-Groups:
+GROUPS TO REVIEW:
 {groups_list}
 
-Instructions:
-1. Only suggest merging groups that are truly about the same concept
-2. Be conservative - when in doubt, keep groups separate
-3. Provide the preferred name for merged groups
+RULES:
+1. Only merge groups about the SAME concept
+2. Be conservative - when unsure, keep separate
+3. Use one of the existing group names as the merge target
+4. Don't create new names
 
-Format as JSON:
+REQUIRED JSON FORMAT:
 {{
     "merges": [
         {{
-            "merge_into": "preferred_group_name",
+            "merge_into": "existing group name to keep",
             "groups_to_merge": ["group1", "group2"]
         }}
     ]
 }}
 
-If no merges are needed, respond with: {{"merges": []}}
-Provide ONLY the JSON response."""
+If no merges needed: {{"merges": []}}
+
+Return ONLY valid JSON, no other text."""
         
         try:
             response = ollama.generate(
@@ -257,24 +338,41 @@ Provide ONLY the JSON response."""
                 prompt=prompt,
                 stream=False,
                 options={
-                    'temperature': 0.1,
-                    'max_tokens': 2000
+                    'temperature': 0.05,  # Very low temperature for consistency
+                    'max_tokens': 2000,
+                    'num_ctx': 4096
                 }
             )
             
             response_text = response['response'].strip()
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
             
-            if json_match:
-                result = json.loads(json_match.group())
+            # Robust JSON extraction
+            json_start = response_text.find('{')
+            json_end = response_text.rfind('}') + 1
+            
+            if json_start >= 0 and json_end > json_start:
+                json_str = response_text[json_start:json_end]
+                json_str = re.sub(r',\s*}', '}', json_str)
+                json_str = re.sub(r',\s*]', ']', json_str)
+                
+                result = json.loads(json_str)
                 merges = result.get('merges', [])
                 
-                # Apply merges
+                # Apply merges with validation
+                applied_merges = 0
                 for merge in merges:
+                    if not isinstance(merge, dict):
+                        continue
+                    if 'merge_into' not in merge or 'groups_to_merge' not in merge:
+                        continue
+                        
                     target_name = merge['merge_into']
                     groups_to_merge = merge['groups_to_merge']
                     
-                    if target_name in groups_to_merge:
+                    if not isinstance(groups_to_merge, list):
+                        continue
+                    
+                    if target_name in groups_to_merge and target_name in grouped_aspects:
                         # Merge all other groups into the target
                         target_data = grouped_aspects[target_name]
                         
@@ -289,12 +387,13 @@ Provide ONLY the JSON response."""
                                 
                                 # Remove the merged group
                                 del grouped_aspects[group_name]
+                                applied_merges += 1
                 
                 # Re-sort by count
                 grouped_aspects = dict(sorted(grouped_aspects.items(), 
                                             key=lambda x: x[1]['count'], reverse=True))
                 
-                print(f"✓ Applied {len(merges)} group merges")
+                print(f"✓ Applied {applied_merges} group merges")
                 
         except Exception as e:
             print(f"⚠ Warning: Could not perform group merging: {e}")
